@@ -1,4 +1,5 @@
 import os
+import time
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -6,32 +7,7 @@ from google import genai
 
 
 # =========================================================
-# CONFIGURATION
-# =========================================================
-
-load_dotenv()
-
-# Try local .env first
-api_key = os.getenv("GEMINI_API_KEY")
-
-# If not found, try Streamlit Cloud Secrets
-if not api_key:
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        api_key = None
-
-# Stop if API key is missing
-if not api_key:
-    st.error("GEMINI_API_KEY is missing.")
-    st.stop()
-
-# Gemini client
-client = genai.Client(api_key=api_key)
-
-
-# =========================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # =========================================================
 
 st.set_page_config(
@@ -42,33 +18,59 @@ st.set_page_config(
 
 
 # =========================================================
+# CONFIGURATION
+# =========================================================
+
+load_dotenv()
+
+api_key = os.getenv("GEMINI_API_KEY")
+
+if not api_key:
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        api_key = None
+
+if not api_key:
+    st.error("GEMINI_API_KEY is missing.")
+    st.stop()
+
+client = genai.Client(api_key=api_key)
+
+MODEL = "gemini-3.5-flash-lite"
+
+
+# =========================================================
 # CUSTOM CSS
 # =========================================================
 
-st.markdown("""
-<style>
+st.markdown(
+    """
+    <style>
 
-.main {
-    background-color: #0b0f14;
-}
+    .main {
+        background-color: #0b0f14;
+    }
 
-.block-container {
-    max-width: 1100px;
-    padding-top: 2rem;
-}
+    .block-container {
+        max-width: 1100px;
+        padding-top: 2rem;
+    }
 
-.title {
-    font-size: 42px;
-    font-weight: 700;
-}
+    .title {
+        font-size: 42px;
+        font-weight: 700;
+    }
 
-.subtitle {
-    color: #8b949e;
-    font-size: 18px;
-}
+    .subtitle {
+        color: #8b949e;
+        font-size: 18px;
+    }
 
-</style>
-""", unsafe_allow_html=True)
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 
 # =========================================================
@@ -89,7 +91,7 @@ st.divider()
 
 
 # =========================================================
-# LANGUAGE
+# LANGUAGE SELECTION
 # =========================================================
 
 language = st.selectbox(
@@ -136,14 +138,14 @@ with col2:
 
 
 # =========================================================
-# AI ANALYSIS FUNCTION
+# PROMPT GENERATION
 # =========================================================
 
-def analyze_code(task):
+def create_prompt(task: str, language: str, code: str) -> str:
 
     if task == "explain":
 
-        prompt = f"""
+        return f"""
 You are an expert programming teacher.
 
 Analyze the following {language} code.
@@ -171,9 +173,7 @@ Code:
 {code}
 """
 
-    else:
-
-        prompt = f"""
+    return f"""
 You are a highly experienced software engineer and professional
 code reviewer.
 
@@ -204,16 +204,67 @@ Code:
 {code}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=prompt
-    )
 
-    return response.text
+# =========================================================
+# GEMINI ANALYSIS
+# =========================================================
+
+def analyze_code(task: str, language: str, code: str) -> str:
+
+    prompt = create_prompt(task, language, code)
+
+    last_error = None
+
+    # Try up to 3 times for temporary 503 errors
+    for attempt in range(3):
+
+        try:
+
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt
+            )
+
+            if response.text:
+                return response.text
+
+            raise Exception("Gemini returned an empty response.")
+
+        except Exception as error:
+
+            last_error = error
+            error_text = str(error)
+
+            # Temporary service availability problem
+            if "503" in error_text or "UNAVAILABLE" in error_text:
+
+                if attempt < 2:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+
+                raise Exception(
+                    "Gemini is temporarily busy. "
+                    "Please try again in a few seconds."
+                ) from error
+
+            # Rate limit
+            if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+
+                raise Exception(
+                    "Gemini API rate limit reached. "
+                    "Please wait a little and try again."
+                ) from error
+
+            # Other errors
+            raise error
+
+    raise Exception(
+        "Unable to get a response from Gemini."
+    ) from last_error
 
 
 # =========================================================
-# PROCESS
+# PROCESS REQUEST
 # =========================================================
 
 if explain_button or bugs_button:
@@ -230,7 +281,11 @@ if explain_button or bugs_button:
 
             try:
 
-                result = analyze_code(task)
+                result = analyze_code(
+                    task,
+                    language,
+                    code
+                )
 
                 st.divider()
 
@@ -238,10 +293,10 @@ if explain_button or bugs_button:
 
                 st.markdown(result)
 
-            except Exception as e:
+            except Exception as error:
 
                 st.error(
-                    f"Something went wrong: {e}"
+                    f"Something went wrong: {error}"
                 )
 
 
